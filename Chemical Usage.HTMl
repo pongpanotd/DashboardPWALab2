@@ -1,0 +1,1075 @@
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { 
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, 
+  LineChart, Line, ComposedChart, Area
+} from 'recharts';
+import { UploadCloud, Filter, Droplet, Activity, Database, Check, ChevronDown, Sparkles, RefreshCw, Plus, Trash2 } from 'lucide-react';
+
+// ลำดับเดือนตามปีงบประมาณไทย
+const THAI_FISCAL_MONTHS = [
+  "ตุลาคม", "พฤศจิกายน", "ธันวาคม", "มกราคม", "กุมภาพันธ์", "มีนาคม",
+  "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน"
+];
+
+// รายชื่อฟิลด์สารเคมีที่ต้องการให้เลือกดู
+const CHEMICAL_FIELDS = [
+  "ปริมาณสารส้ม (กก.)",
+  "ปริมาณPACl (กก.)",
+  "ปูนคลอรีน",
+  "ปูนขาว",
+  "แก๊สคลอรีนเหลวบรรจุท่อ 100 Kg",
+  "แก๊สคลอรีนเหลวบรรจุท่อ 1000 Kg"
+];
+
+const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4'];
+
+// Custom MultiSelect Component
+const MultiSelect = ({ options, selected, onChange, placeholder }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const toggleOption = (option) => {
+    if (selected.includes(option)) {
+      onChange(selected.filter(item => item !== option));
+    } else {
+      onChange([...selected, option]);
+    }
+  };
+
+  const selectAll = () => onChange(options);
+  const clearAll = () => onChange([]);
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <div 
+        className="flex items-center justify-between p-2.5 bg-white border border-slate-300 rounded-lg cursor-pointer hover:border-blue-400 transition-colors"
+        onClick={() => setIsOpen(!isOpen)}
+      >
+        <span className="text-sm text-slate-700 truncate pr-2">
+          {selected.length === 0 ? placeholder : 
+           selected.length === options.length ? `เลือกทั้งหมด (${options.length})` :
+           `${selected.length} รายการที่เลือก`}
+        </span>
+        <ChevronDown size={16} className={`text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+      </div>
+
+      {isOpen && (
+        <div className="absolute z-10 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-xl max-h-60 overflow-y-auto">
+          <div className="flex justify-between p-2 border-b border-slate-100 sticky top-0 bg-white">
+            <button onClick={selectAll} className="text-xs text-blue-600 hover:text-blue-800 font-medium">เลือกทั้งหมด</button>
+            <button onClick={clearAll} className="text-xs text-red-600 hover:text-red-800 font-medium">ล้าง</button>
+          </div>
+          {options.map((opt, idx) => (
+            <div 
+              key={idx} 
+              className="flex items-center px-3 py-2 hover:bg-slate-50 cursor-pointer"
+              onClick={() => toggleOption(opt)}
+            >
+              <div className={`w-4 h-4 mr-2 rounded border flex items-center justify-center ${selected.includes(opt) ? 'bg-blue-500 border-blue-500' : 'border-slate-300'}`}>
+                {selected.includes(opt) && <Check size={12} className="text-white" />}
+              </div>
+              <span className="text-sm text-slate-700">{opt}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default function App() {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  // Filter States
+  const [branches, setBranches] = useState([]);
+  const [selectedBranches, setSelectedBranches] = useState([]);
+  
+  const [stations, setStations] = useState([]);
+  const [selectedStations, setSelectedStations] = useState([]);
+  
+  const [fiscalYears, setFiscalYears] = useState([]);
+  const [selectedFiscalYears, setSelectedFiscalYears] = useState([]);
+
+  const [selectedChemical, setSelectedChemical] = useState(CHEMICAL_FIELDS[0]);
+  const [groupBy, setGroupBy] = useState('สถานีผลิต'); 
+  
+  const [selectedMonths, setSelectedMonths] = useState(THAI_FISCAL_MONTHS);
+  const [compareBy, setCompareBy] = useState('year'); 
+
+  const [groupByConc, setGroupByConc] = useState('timeline');
+  const [groupBySpecConc, setGroupBySpecConc] = useState('timeline');
+  const [groupByTurb, setGroupByTurb] = useState('timeline');
+
+  const [aiInsight, setAiInsight] = useState('');
+  const [isGeneratingAI, setIsGeneratingAI] = useState(false);
+
+  // ล้างข้อมูลทั้งหมดเพื่ออัปโหลดชุดข้อมูลใหม่
+  const clearData = () => {
+    if (window.confirm('คุณต้องการล้างข้อมูลทั้งหมดใช่หรือไม่?')) {
+      setData([]);
+      setBranches([]); setSelectedBranches([]);
+      setStations([]); setSelectedStations([]);
+      setFiscalYears([]); setSelectedFiscalYears([]);
+      setAiInsight('');
+    }
+  };
+
+  // Parse CSV (รองรับหลายไฟล์พร้อมกันและระบบ Append)
+  const handleFileUpload = async (event) => {
+    const files = Array.from(event.target.files);
+    if (!files || files.length === 0) return;
+
+    setLoading(true);
+
+    const processFile = (file) => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const buffer = e.target.result;
+            let text = new TextDecoder('utf-8').decode(buffer);
+            
+            if (!text.includes('สาขา') && !text.includes('สถานี') && !text.includes('เดือน')) {
+              text = new TextDecoder('windows-874').decode(buffer);
+            }
+
+            const lines = text.split(/\r\n|\n|\r/).filter(line => line.trim() !== '');
+            if (lines.length < 2) { resolve([]); return; }
+
+            const parseCSVLine = (line) => {
+              let result = [];
+              let current = '';
+              let inQuotes = false;
+              for (let i = 0; i < line.length; i++) {
+                let char = line[i];
+                if (char === '"') {
+                  if (inQuotes && line[i + 1] === '"') {
+                    current += '"';
+                    i++; 
+                  } else {
+                    inQuotes = !inQuotes;
+                  }
+                } else if (char === ',' && !inQuotes) {
+                  result.push(current);
+                  current = '';
+                } else {
+                  current += char;
+                }
+              }
+              result.push(current);
+              return result.map(val => val.trim());
+            };
+
+            let headerLine = lines[0].replace(/^\uFEFF/, '');
+            const headers = parseCSVLine(headerLine);
+            const parsedData = [];
+
+            for (let i = 1; i < lines.length; i++) {
+              const values = parseCSVLine(lines[i]);
+              if (values.length === 0 || (values.length === 1 && values[0] === '')) continue;
+
+              const row = {};
+              headers.forEach((header, index) => {
+                let val = values[index] !== undefined ? values[index] : '';
+                
+                if (
+                  header === 'Jar test' || 
+                  header === 'ความเข้มข้นสารตกตะกอนต่อปริมาณน้ำผลิตจริง' || 
+                  header === 'ความขุ่นน้ำดิบ' ||
+                  header.includes('ปริมาณ') ||
+                  CHEMICAL_FIELDS.includes(header)
+                ) {
+                  const cleanNum = String(val).replace(/,/g, '');
+                  val = Number(cleanNum) || 0;
+                }
+                row[header] = val;
+              });
+              
+              if (row['กปภ.สาขา']) {
+                parsedData.push(row);
+              }
+            }
+            resolve(parsedData);
+          } catch (error) {
+            reject(error);
+          }
+        };
+        reader.readAsArrayBuffer(file);
+      });
+    };
+
+    try {
+      const allResults = await Promise.all(files.map(processFile));
+      const newMergedData = allResults.flat();
+
+      setData(prevData => {
+        // สร้าง Map สำหรับทำ Deduplication ป้องกันข้อมูลซ้ำหากอัปโหลดไฟล์เดือนเดิม
+        const dataMap = new Map();
+        
+        // 1. นำข้อมูลเก่ามาใส่ใน Map
+        prevData.forEach(row => {
+          const key = `${row['กปภ.สาขา']}-${row['สถานีผลิต']}-${row['เดือนไทย']}-${row['ปีงบประมาณ']}`;
+          dataMap.set(key, row);
+        });
+
+        // 2. นำข้อมูลใหม่มาใส่ทับ (ถ้า key ตรงกัน แสดงว่าเป็นสถานีเดิมเดือนเดิม จะถือว่าเป็นการอัปเดตข้อมูล)
+        newMergedData.forEach(row => {
+          const key = `${row['กปภ.สาขา']}-${row['สถานีผลิต']}-${row['เดือนไทย']}-${row['ปีงบประมาณ']}`;
+          dataMap.set(key, row);
+        });
+
+        const combinedData = Array.from(dataMap.values());
+
+        // อัปเดตตัวกรองต่างๆ ให้รองรับข้อมูลใหม่ที่อาจจะงอกมา
+        const uniqueBranches = [...new Set(combinedData.map(d => String(d['กปภ.สาขา'])).filter(Boolean))].sort();
+        const uniqueYears = [...new Set(combinedData.map(d => String(d['ปีงบประมาณ'])).filter(Boolean))].sort((a,b) => b-a);
+
+        setBranches(prev => {
+          const newItems = uniqueBranches.filter(b => !prev.includes(b));
+          setSelectedBranches(s => [...s, ...newItems]); // ออโต้เลือกสาขาใหม่ที่เพิ่งอัปโหลดเข้ามา
+          return uniqueBranches;
+        });
+
+        setFiscalYears(prev => {
+          const newItems = uniqueYears.filter(y => !prev.includes(y));
+          if (prev.length === 0) {
+            setSelectedFiscalYears(uniqueYears.slice(0, 3));
+          } else {
+            setSelectedFiscalYears(s => [...new Set([...s, ...newItems])]);
+          }
+          return uniqueYears;
+        });
+
+        return combinedData;
+      });
+
+    } catch (error) {
+      console.error("Error processing files:", error);
+      alert("เกิดข้อผิดพลาดในการประมวลผลไฟล์ กรุณาตรวจสอบรูปแบบไฟล์ CSV");
+    } finally {
+      setLoading(false);
+      event.target.value = null; // เคลียร์ input ให้สามารถกดอัปโหลดไฟล์เดิมซ้ำได้
+    }
+  };
+
+  // ปรับปรุงตัวเลือกสถานีผลิตน้ำให้ล้อตาม กปภ.สาขา ที่เลือก
+  useEffect(() => {
+    if (data.length === 0) return;
+    
+    setStations(prevStations => {
+      const newStations = [...new Set(
+        data.filter(item => selectedBranches.includes(item['กปภ.สาขา']))
+            .map(d => String(d['สถานีผลิต']))
+            .filter(Boolean)
+      )].sort();
+      
+      const addedStations = newStations.filter(s => !prevStations.includes(s));
+      
+      setSelectedStations(prevSelected => {
+        const validPrev = prevSelected.filter(s => newStations.includes(s));
+        return [...validPrev, ...addedStations];
+      });
+      
+      return newStations;
+    });
+  }, [selectedBranches, data]);
+
+  // กรองข้อมูลตามที่เลือก
+  const filteredData = useMemo(() => {
+    return data.filter(item => {
+      const monthStr = (item['เดือนไทย'] || '').toString().trim();
+      return selectedBranches.includes(item['กปภ.สาขา']) &&
+             selectedStations.includes(item['สถานีผลิต']) &&
+             selectedFiscalYears.includes(item['ปีงบประมาณ']) &&
+             selectedMonths.includes(monthStr);
+    });
+  }, [data, selectedBranches, selectedStations, selectedFiscalYears, selectedMonths]);
+
+  // เตรียมข้อมูลสำหรับกราฟเปรียบเทียบปริมาณสารเคมี
+  const chemicalChartData = useMemo(() => {
+    const grouped = {};
+    
+    filteredData.forEach(item => {
+      const key = item[groupBy];
+      const value = item[selectedChemical] || 0;
+
+      if (!grouped[key]) {
+        grouped[key] = { name: key };
+      }
+
+      if (compareBy === 'year') {
+        const year = item['ปีงบประมาณ'];
+        if (!grouped[key][year]) grouped[key][year] = 0;
+        grouped[key][year] += value;
+      } else {
+        const month = (item['เดือนไทย'] || '').toString().trim();
+        if (!grouped[key][month]) grouped[key][month] = 0;
+        grouped[key][month] += value;
+      }
+    });
+
+    return Object.values(grouped).sort((a, b) => a.name.localeCompare(b.name));
+  }, [filteredData, selectedChemical, groupBy, compareBy]);
+
+  // เตรียมข้อมูลสำหรับกราฟ Jar test vs คำนวณ
+  const concentrationChartData = useMemo(() => {
+    const grouped = {};
+
+    filteredData.forEach(item => {
+      let sortKey, displayLabel;
+
+      if (groupByConc === 'timeline') {
+        const fiscalYear = item['ปีงบประมาณ'];
+        const calYear = item['ปีไทย']; 
+        const monthStr = (item['เดือนไทย'] || '').toString().trim();
+        const monthIdx = THAI_FISCAL_MONTHS.indexOf(monthStr);
+        
+        if (monthIdx === -1) return;
+
+        sortKey = `${fiscalYear}-${monthIdx.toString().padStart(2, '0')}`;
+        displayLabel = calYear ? `${monthStr} ${calYear}` : `${monthStr} ${monthIdx < 3 ? fiscalYear - 1 : fiscalYear}`;
+      } else {
+        sortKey = item[groupByConc];
+        displayLabel = item[groupByConc];
+        if (!sortKey) return;
+      }
+
+      if (!grouped[sortKey]) {
+        grouped[sortKey] = {
+          sortKey,
+          label: displayLabel,
+          jarTestSum: 0,
+          calConcentrationSum: 0,
+          count: 0
+        };
+      }
+
+      grouped[sortKey].jarTestSum += (item['Jar test'] || 0);
+      grouped[sortKey].calConcentrationSum += (item['ความเข้มข้นสารตกตะกอนต่อปริมาณน้ำผลิตจริง'] || 0);
+      grouped[sortKey].count += 1;
+    });
+
+    return Object.values(grouped)
+      .sort((a, b) => groupByConc === 'timeline' ? a.sortKey.localeCompare(b.sortKey) : a.label.localeCompare(b.label))
+      .map(item => ({
+        label: item.label,
+        "Jar Test (Avg)": Number((item.jarTestSum / item.count).toFixed(2)),
+        "คำนวณจากน้ำผลิต (Avg)": Number((item.calConcentrationSum / item.count).toFixed(2))
+      }));
+
+  }, [filteredData, groupByConc]);
+
+  // เตรียมข้อมูลสำหรับกราฟ สารส้ม vs PACl vs Jar test
+  const specificConcentrationData = useMemo(() => {
+    const grouped = {};
+
+    filteredData.forEach(item => {
+      let sortKey, displayLabel;
+
+      if (groupBySpecConc === 'timeline') {
+        const fiscalYear = item['ปีงบประมาณ'];
+        const calYear = item['ปีไทย'];
+        const monthStr = (item['เดือนไทย'] || '').toString().trim();
+        const monthIdx = THAI_FISCAL_MONTHS.indexOf(monthStr);
+        
+        if (monthIdx === -1) return;
+
+        sortKey = `${fiscalYear}-${monthIdx.toString().padStart(2, '0')}`;
+        displayLabel = calYear ? `${monthStr} ${calYear}` : `${monthStr} ${monthIdx < 3 ? fiscalYear - 1 : fiscalYear}`;
+      } else {
+        sortKey = item[groupBySpecConc];
+        displayLabel = item[groupBySpecConc];
+        if (!sortKey) return;
+      }
+
+      if (!grouped[sortKey]) {
+        grouped[sortKey] = {
+          sortKey,
+          label: displayLabel,
+          alumSum: 0, alumCount: 0,
+          paclSum: 0, paclCount: 0,
+          jarSum: 0, jarCount: 0
+        };
+      }
+
+      const water = item['ปริมาณน้ำผลิตจริง (ลบ.ม.)'] || 0;
+      const alum = item['ปริมาณสารส้ม (กก.)'] || 0;
+      const pacl = item['ปริมาณPACl (กก.)'] || 0;
+      const jar = item['Jar test'] || 0;
+
+      if (alum > 0 && water > 0) {
+        grouped[sortKey].alumSum += (alum * 1000) / water;
+        grouped[sortKey].alumCount += 1;
+      }
+      if (pacl > 0 && water > 0) {
+        grouped[sortKey].paclSum += (pacl * 1000) / water;
+        grouped[sortKey].paclCount += 1;
+      }
+      if (jar > 0) {
+        grouped[sortKey].jarSum += jar;
+        grouped[sortKey].jarCount += 1;
+      }
+    });
+
+    return Object.values(grouped)
+      .sort((a, b) => groupBySpecConc === 'timeline' ? a.sortKey.localeCompare(b.sortKey) : a.label.localeCompare(b.label))
+      .map(item => ({
+        label: item.label,
+        "Jar Test": item.jarCount > 0 ? Number((item.jarSum / item.jarCount).toFixed(2)) : 0,
+        "ความเข้มข้นสารส้ม": item.alumCount > 0 ? Number((item.alumSum / item.alumCount).toFixed(2)) : 0,
+        "ความเข้มข้น PACl": item.paclCount > 0 ? Number((item.paclSum / item.paclCount).toFixed(2)) : 0
+      }));
+  }, [filteredData, groupBySpecConc]);
+
+  // เตรียมข้อมูลสำหรับกราฟ ความขุ่นน้ำดิบ vs ปริมาณสารเคมี
+  const turbidityChartData = useMemo(() => {
+    const grouped = {};
+
+    filteredData.forEach(item => {
+      let sortKey, displayLabel;
+
+      if (groupByTurb === 'timeline') {
+        const fiscalYear = item['ปีงบประมาณ'];
+        const calYear = item['ปีไทย'];
+        const monthStr = (item['เดือนไทย'] || '').toString().trim();
+        const monthIdx = THAI_FISCAL_MONTHS.indexOf(monthStr);
+        
+        if (monthIdx === -1) return;
+
+        sortKey = `${fiscalYear}-${monthIdx.toString().padStart(2, '0')}`;
+        displayLabel = calYear ? `${monthStr} ${calYear}` : `${monthStr} ${monthIdx < 3 ? fiscalYear - 1 : fiscalYear}`;
+      } else {
+        sortKey = item[groupByTurb];
+        displayLabel = item[groupByTurb];
+        if (!sortKey) return;
+      }
+
+      if (!grouped[sortKey]) {
+        grouped[sortKey] = {
+          sortKey,
+          label: displayLabel,
+          turbiditySum: 0, 
+          turbidityCount: 0,
+          chemicalSum: 0
+        };
+      }
+
+      const turbidity = item['ความขุ่นน้ำดิบ'] || 0;
+      const chemical = item[selectedChemical] || 0;
+
+      if (turbidity > 0) {
+        grouped[sortKey].turbiditySum += turbidity;
+        grouped[sortKey].turbidityCount += 1;
+      }
+      grouped[sortKey].chemicalSum += chemical;
+    });
+
+    return Object.values(grouped)
+      .sort((a, b) => groupByTurb === 'timeline' ? a.sortKey.localeCompare(b.sortKey) : a.label.localeCompare(b.label))
+      .map(item => ({
+        label: item.label,
+        "ความขุ่นน้ำดิบ (เฉลี่ย)": item.turbidityCount > 0 ? Number((item.turbiditySum / item.turbidityCount).toFixed(2)) : 0,
+        [selectedChemical]: item.chemicalSum
+      }));
+  }, [filteredData, selectedChemical, groupByTurb]);
+
+
+  // AI Logic
+  const generateAIInsight = async () => {
+    setIsGeneratingAI(true);
+    setAiInsight('');
+    
+    const branchSummary = {};
+    filteredData.forEach(item => {
+      const b = item['กปภ.สาขา'];
+      if (!branchSummary[b]) branchSummary[b] = { count: 0, jar: 0, actual: 0, turb: 0 };
+      branchSummary[b].count++;
+      branchSummary[b].jar += item['Jar test'] || 0;
+      branchSummary[b].actual += item['ความเข้มข้นสารตกตะกอนต่อปริมาณน้ำผลิตจริง'] || 0;
+      branchSummary[b].turb += item['ความขุ่นน้ำดิบ'] || 0;
+    });
+    
+    const summaryText = Object.keys(branchSummary).map(b => {
+      const d = branchSummary[b];
+      return `สาขา ${b}: Jar Test เฉลี่ย ${(d.jar/d.count).toFixed(2)} mg/L, ใช้จริงเฉลี่ย ${(d.actual/d.count).toFixed(2)} mg/L, ความขุ่นน้ำดิบเฉลี่ย ${(d.turb/d.count).toFixed(2)} NTU`;
+    }).join('\n');
+
+    const prompt = `ในฐานะผู้เชี่ยวชาญด้านการผลิตน้ำประปาและควบคุมคุณภาพน้ำ โปรดวิเคราะห์ข้อมูลค่าเฉลี่ยการใช้สารเคมี (Jar Test เทียบกับ ค่าที่ใช้จริง) และความขุ่นของน้ำดิบ ของ กปภ.สาขา ต่างๆ ต่อไปนี้ (ข้อมูลเฉพาะช่วงเวลาที่เลือก): \n\n${summaryText}\n\nโปรดให้คำแนะนำ 3-4 ข้อเพื่อวิเคราะห์ปัญหาและแนวทางแก้ไขสำหรับสาขาที่มีความผิดปกติ (เช่น ใช้สารเคมีจริงสูงกว่า Jar Test มาก หรือความขุ่นต่ำแต่ใช้สารเคมีเยอะ) เพื่อช่วยลดต้นทุนและเพิ่มประสิทธิภาพการผลิตน้ำ (ตอบเป็นภาษาไทย ใช้คำสุภาพ เป็นมืออาชีพ เน้นข้อความที่สำคัญหรือชื่อสาขาด้วยสัญลักษณ์ **ข้อความ**)`;
+
+    const apiKey = ""; 
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+    
+    const payload = {
+      contents: [{ parts: [{ text: prompt }] }],
+      systemInstruction: { parts: [{ text: "You are an expert water treatment and chemical optimization analyst." }] }
+    };
+
+    const fetchWithRetry = async (url, options, retries = 5, delay = 1000) => {
+      try {
+        const res = await fetch(url, options);
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        return await res.json();
+      } catch (error) {
+        if (retries > 0) {
+          await new Promise(r => setTimeout(r, delay));
+          return fetchWithRetry(url, options, retries - 1, delay * 2);
+        }
+        throw error;
+      }
+    };
+
+    try {
+      const result = await fetchWithRetry(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text || "ไม่สามารถสร้างคำแนะนำได้ในขณะนี้";
+      setAiInsight(text);
+    } catch (e) {
+      setAiInsight("เกิดข้อผิดพลาดในการเชื่อมต่อกับ AI กรุณาลองใหม่อีกครั้ง");
+    } finally {
+      setIsGeneratingAI(false);
+    }
+  };
+
+  const parseFormattedText = (text) => {
+    const htmlString = text
+      .replace(/\*\*(.*?)\*\*/g, '<strong class="text-indigo-700 font-semibold">$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em class="text-slate-700">$1</em>')
+      .replace(/\n/g, '<br />');
+    return <div dangerouslySetInnerHTML={{ __html: htmlString }} className="text-slate-700 leading-relaxed text-sm" />;
+  };
+
+  // หน้าจอตอนยังไม่อัปโหลดไฟล์
+  if (data.length === 0) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center border border-slate-100">
+          <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-6">
+            <Database className="text-blue-500" size={40} />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-800 mb-2">ระบบวิเคราะห์ข้อมูลสารเคมี</h1>
+          <p className="text-slate-500 mb-8 text-sm">อัปโหลดไฟล์ cleaned_chemical_usage.csv เพื่อเริ่มการวิเคราะห์และแสดงผลแดชบอร์ด</p>
+          
+          <label className="relative inline-flex items-center justify-center w-full px-6 py-4 text-sm font-medium text-white transition-all bg-blue-600 border border-transparent rounded-xl shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 cursor-pointer overflow-hidden group">
+            <UploadCloud className="w-5 h-5 mr-2 group-hover:-translate-y-1 transition-transform" />
+            <span>เลือกไฟล์ CSV</span>
+            <input 
+              type="file" 
+              multiple
+              accept=".csv" 
+              onChange={handleFileUpload} 
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+            />
+          </label>
+          {loading && <p className="mt-4 text-sm text-blue-500 animate-pulse">กำลังประมวลผลข้อมูล...</p>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans">
+      {/* Header */}
+      <header className="bg-white shadow-sm border-b border-slate-200 sticky top-0 z-20">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="bg-blue-600 p-2 rounded-lg text-white">
+              <Droplet size={24} />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-slate-800 leading-tight">Chemical Analysis Dashboard</h1>
+              <p className="text-xs text-slate-500 font-medium">ระบบวิเคราะห์การใช้สารเคมีและการผลิตน้ำ</p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-3 text-sm">
+            <div className="hidden sm:flex items-center text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">
+              <Database size={14} className="mr-2" />
+              ข้อมูล {data.length.toLocaleString()} รายการ
+            </div>
+            
+            <label className="flex items-center px-3 py-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-full cursor-pointer transition-colors font-medium">
+              <Plus size={14} className="mr-1.5" />
+              เพิ่มข้อมูล
+              <input type="file" multiple accept=".csv" onChange={handleFileUpload} className="hidden" />
+            </label>
+            
+            <button 
+              onClick={clearData}
+              className="flex items-center px-3 py-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-full cursor-pointer transition-colors font-medium"
+            >
+              <Trash2 size={14} className="mr-1.5" />
+              ล้างข้อมูล
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        
+        {/* Filters Section */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-8">
+          <div className="flex items-center text-slate-800 font-semibold mb-4">
+            <Filter size={18} className="mr-2 text-blue-500" />
+            ตัวกรองข้อมูล
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">ปีงบประมาณ</label>
+              <MultiSelect 
+                options={fiscalYears} 
+                selected={selectedFiscalYears} 
+                onChange={setSelectedFiscalYears} 
+                placeholder="เลือกปีงบประมาณ" 
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">เดือน</label>
+              <MultiSelect 
+                options={THAI_FISCAL_MONTHS} 
+                selected={selectedMonths} 
+                onChange={setSelectedMonths} 
+                placeholder="เลือกเดือน" 
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">กปภ.สาขา</label>
+              <MultiSelect 
+                options={branches} 
+                selected={selectedBranches} 
+                onChange={setSelectedBranches} 
+                placeholder="เลือกสาขา" 
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">สถานีผลิตน้ำ</label>
+              <MultiSelect 
+                options={stations} 
+                selected={selectedStations} 
+                onChange={setSelectedStations} 
+                placeholder="เลือกสถานี" 
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          
+          {/* Chart 1: ปริมาณสารเคมี */}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+              <div className="flex items-center">
+                <div className="p-2 bg-emerald-100 text-emerald-600 rounded-lg mr-3">
+                  <Activity size={20} />
+                </div>
+                <h2 className="text-lg font-bold text-slate-800">เปรียบเทียบปริมาณการใช้สารเคมี</h2>
+              </div>
+              <div className="flex flex-col sm:flex-row w-full sm:w-auto gap-2 flex-wrap justify-end">
+                <select 
+                  value={groupBy}
+                  onChange={(e) => setGroupBy(e.target.value)}
+                  className="bg-slate-50 border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2.5 outline-none transition-colors"
+                >
+                  <option value="กปภ.สาขา">รวมตาม กปภ.สาขา</option>
+                  <option value="สถานีผลิต">แยกตาม สถานีผลิตน้ำ</option>
+                </select>
+                <select 
+                  value={compareBy}
+                  onChange={(e) => setCompareBy(e.target.value)}
+                  className="bg-slate-50 border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2.5 outline-none transition-colors"
+                >
+                  <option value="year">เปรียบเทียบรายปี</option>
+                  <option value="month">เปรียบเทียบรายเดือน</option>
+                </select>
+                <select 
+                  value={selectedChemical}
+                  onChange={(e) => setSelectedChemical(e.target.value)}
+                  className="w-full sm:w-64 bg-slate-50 border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2.5 outline-none transition-colors"
+                >
+                  {CHEMICAL_FIELDS.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div className="h-[400px] w-full">
+              {chemicalChartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chemicalChartData} margin={{ top: 35, right: 30, left: 20, bottom: 60 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis 
+                      dataKey="name" 
+                      tick={{ fill: '#64748b', fontSize: 12 }}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                      tickLine={false}
+                      angle={-45}
+                      textAnchor="end"
+                    />
+                    <YAxis 
+                      tick={{ fill: '#64748b', fontSize: 12 }}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                      tickLine={false}
+                      tickFormatter={(value) => new Intl.NumberFormat('en-US', { notation: "compact", compactDisplay: "short" }).format(value)}
+                    />
+                    <RechartsTooltip 
+                      cursor={{fill: '#f1f5f9'}}
+                      contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                    />
+                    <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                    
+                    {compareBy === 'year' 
+                      ? selectedFiscalYears.sort().map((year, index) => (
+                          <Bar 
+                            key={`year-${year}`} 
+                            dataKey={year} 
+                            name={`ปี ${year}`} 
+                            fill={COLORS[index % COLORS.length]} 
+                            radius={[4, 4, 0, 0]}
+                            maxBarSize={50}
+                            label={{ 
+                              position: 'top', 
+                              fill: '#64748b', 
+                              fontSize: 10,
+                              formatter: (value) => value > 0 ? new Intl.NumberFormat('en-US', { notation: "compact", compactDisplay: "short" }).format(value) : ''
+                            }}
+                          />
+                        ))
+                      : selectedMonths
+                          .sort((a, b) => THAI_FISCAL_MONTHS.indexOf(a) - THAI_FISCAL_MONTHS.indexOf(b))
+                          .map((month, index) => (
+                          <Bar 
+                            key={`month-${month}`} 
+                            dataKey={month} 
+                            name={month} 
+                            fill={COLORS[index % COLORS.length]} 
+                            radius={[4, 4, 0, 0]}
+                            maxBarSize={50}
+                            label={{ 
+                              position: 'top', 
+                              fill: '#64748b', 
+                              fontSize: 10,
+                              formatter: (value) => value > 0 ? new Intl.NumberFormat('en-US', { notation: "compact", compactDisplay: "short" }).format(value) : ''
+                            }}
+                          />
+                        ))
+                    }
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-full flex items-center justify-center text-slate-400">ไม่มีข้อมูลตามเงื่อนไขที่เลือก</div>
+              )}
+            </div>
+          </div>
+
+          {/* Chart 2: Jar test vs คำนวณ */}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+              <div className="flex items-center">
+                <div className="p-2 bg-purple-100 text-purple-600 rounded-lg mr-3">
+                  <Droplet size={20} />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-800">เปรียบเทียบความเข้มข้นสารเคมี</h2>
+                  <p className="text-xs text-slate-500">Jar test เปรียบเทียบกับการคำนวณจากปริมาณน้ำผลิตจริง (ค่าเฉลี่ย)</p>
+                </div>
+              </div>
+              <div className="w-full sm:w-auto">
+                <select 
+                  value={groupByConc}
+                  onChange={(e) => setGroupByConc(e.target.value)}
+                  className="w-full sm:w-auto bg-slate-50 border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2.5 outline-none transition-colors"
+                >
+                  <option value="timeline">เรียงตามเวลา (Timeline)</option>
+                  <option value="กปภ.สาขา">รวมตาม กปภ.สาขา</option>
+                  <option value="สถานีผลิต">แยกตาม สถานีผลิตน้ำ</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="h-[400px] w-full">
+              {concentrationChartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={concentrationChartData} margin={{ top: 20, right: 30, left: 10, bottom: 60 }}>
+                    <defs>
+                      <linearGradient id="colorJarTest" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.2}/>
+                        <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis 
+                      dataKey="label" 
+                      tick={{ fill: '#64748b', fontSize: 12 }}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                      tickLine={false}
+                      angle={-45}
+                      textAnchor="end"
+                    />
+                    <YAxis 
+                      tick={{ fill: '#64748b', fontSize: 12 }}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                      tickLine={false}
+                    />
+                    <RechartsTooltip 
+                      contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                    />
+                    <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                    
+                    <Area 
+                      type="monotone" 
+                      dataKey="Jar Test (Avg)" 
+                      stroke="#3b82f6" 
+                      strokeWidth={3}
+                      fillOpacity={1} 
+                      fill="url(#colorJarTest)" 
+                      activeDot={{ r: 6, strokeWidth: 0 }}
+                    />
+                    <Line 
+                      type="monotone" 
+                      dataKey="คำนวณจากน้ำผลิต (Avg)" 
+                      stroke="#f59e0b" 
+                      strokeWidth={3}
+                      dot={{ r: 3, fill: '#f59e0b' }}
+                      activeDot={{ r: 6, strokeWidth: 0 }}
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-full flex items-center justify-center text-slate-400">ไม่มีข้อมูลตามเงื่อนไขที่เลือก</div>
+              )}
+            </div>
+
+          </div>
+        </div>
+
+        {/* แถวที่ 2 ของกราฟ: จัด Layout ให้ Chart 3 และ Chart 4 อยู่ข้างกัน */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8">
+          
+          {/* Chart 3: เปรียบเทียบความเข้มข้นสารส้ม vs PACl vs Jar test */}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+              <div className="flex items-center">
+                <div className="p-2 bg-indigo-100 text-indigo-600 rounded-lg mr-3">
+                  <Activity size={20} />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-800">เปรียบเทียบความเข้มข้นสารเคมีรายชนิด</h2>
+                  <p className="text-xs text-slate-500">ความเข้มข้นของสารส้ม และ PACl เปรียบเทียบกับค่า Jar test (เฉลี่ย)</p>
+                </div>
+              </div>
+              <div className="w-full sm:w-auto">
+                <select 
+                  value={groupBySpecConc}
+                  onChange={(e) => setGroupBySpecConc(e.target.value)}
+                  className="w-full sm:w-auto bg-slate-50 border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2.5 outline-none transition-colors"
+                >
+                  <option value="timeline">เรียงตามเวลา (Timeline)</option>
+                  <option value="กปภ.สาขา">รวมตาม กปภ.สาขา</option>
+                  <option value="สถานีผลิต">แยกตาม สถานีผลิตน้ำ</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="h-[400px] w-full">
+              {specificConcentrationData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={specificConcentrationData} margin={{ top: 20, right: 30, left: 10, bottom: 60 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis 
+                      dataKey="label" 
+                      tick={{ fill: '#64748b', fontSize: 12 }}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                      tickLine={false}
+                      angle={-45}
+                      textAnchor="end"
+                    />
+                    <YAxis 
+                      tick={{ fill: '#64748b', fontSize: 12 }}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                      tickLine={false}
+                    />
+                    <RechartsTooltip 
+                      contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                    />
+                    <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                    
+                    <Line 
+                      type="monotone" 
+                      dataKey="Jar Test" 
+                      stroke="#64748b" 
+                      strokeWidth={3}
+                      strokeDasharray="5 5"
+                      dot={false}
+                      activeDot={{ r: 6, strokeWidth: 0 }}
+                    />
+                    <Line 
+                      type="monotone" 
+                      dataKey="ความเข้มข้นสารส้ม" 
+                      stroke="#3b82f6" 
+                      strokeWidth={3}
+                      dot={{ r: 3, fill: '#3b82f6' }}
+                      activeDot={{ r: 6, strokeWidth: 0 }}
+                    />
+                    <Line 
+                      type="monotone" 
+                      dataKey="ความเข้มข้น PACl" 
+                      stroke="#10b981" 
+                      strokeWidth={3}
+                      dot={{ r: 3, fill: '#10b981' }}
+                      activeDot={{ r: 6, strokeWidth: 0 }}
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-full flex items-center justify-center text-slate-400">ไม่มีข้อมูลตามเงื่อนไขที่เลือก</div>
+              )}
+            </div>
+          </div>
+
+          {/* Chart 4: ความขุ่นน้ำดิบ vs ปริมาณสารเคมี */}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+            <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center mb-6 gap-4">
+              <div className="flex items-center">
+                <div className="p-2 bg-orange-100 text-orange-600 rounded-lg mr-3">
+                  <Droplet size={20} />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-800">ความขุ่นน้ำดิบ เทียบปริมาณสารเคมี</h2>
+                  <p className="text-xs text-slate-500">ความขุ่นน้ำดิบ (เฉลี่ย) เทียบกับ ปริมาณ {selectedChemical} (รวม)</p>
+                </div>
+              </div>
+              <div className="w-full xl:w-auto">
+                <select 
+                  value={groupByTurb}
+                  onChange={(e) => setGroupByTurb(e.target.value)}
+                  className="w-full xl:w-auto bg-slate-50 border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2.5 outline-none transition-colors"
+                >
+                  <option value="timeline">เรียงตามเวลา (Timeline)</option>
+                  <option value="กปภ.สาขา">รวมตาม กปภ.สาขา</option>
+                  <option value="สถานีผลิต">แยกตาม สถานีผลิตน้ำ</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="h-[400px] w-full">
+              {turbidityChartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={turbidityChartData} margin={{ top: 20, right: 10, left: 10, bottom: 60 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <XAxis 
+                      dataKey="label" 
+                      tick={{ fill: '#64748b', fontSize: 12 }}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                      tickLine={false}
+                      angle={-45}
+                      textAnchor="end"
+                    />
+                    <YAxis 
+                      yAxisId="left"
+                      tick={{ fill: '#64748b', fontSize: 12 }}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                      tickLine={false}
+                      tickFormatter={(value) => new Intl.NumberFormat('en-US', { notation: "compact", compactDisplay: "short" }).format(value)}
+                    />
+                    <YAxis 
+                      yAxisId="right"
+                      orientation="right"
+                      tick={{ fill: '#ea580c', fontSize: 12 }}
+                      axisLine={{ stroke: '#cbd5e1' }}
+                      tickLine={false}
+                    />
+                    <RechartsTooltip 
+                      contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                      formatter={(value, name) => [new Intl.NumberFormat('en-US').format(value), name]}
+                    />
+                    <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                    
+                    <Bar 
+                      yAxisId="left"
+                      dataKey={selectedChemical} 
+                      fill="#3b82f6" 
+                      radius={[4, 4, 0, 0]} 
+                      name={`ปริมาณ ${selectedChemical}`} 
+                      maxBarSize={50}
+                    />
+                    <Line 
+                      yAxisId="right"
+                      type="monotone" 
+                      dataKey="ความขุ่นน้ำดิบ (เฉลี่ย)" 
+                      stroke="#ea580c" 
+                      strokeWidth={3}
+                      dot={{ r: 3, fill: '#ea580c' }}
+                      activeDot={{ r: 6, strokeWidth: 0 }}
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-full flex items-center justify-center text-slate-400">ไม่มีข้อมูลตามเงื่อนไขที่เลือก</div>
+              )}
+            </div>
+          </div>
+          
+        </div>
+
+        {/* AI Insight Section */}
+        <div className="bg-gradient-to-br from-indigo-50 to-white rounded-xl shadow-sm border border-indigo-100 p-6 mt-8">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+            <div className="flex items-center">
+              <div className="p-2 bg-indigo-600 text-white rounded-lg mr-3 shadow-sm">
+                <Sparkles size={20} />
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-slate-800">AI ผู้ช่วยวิเคราะห์ข้อมูล (AI Insights)</h2>
+                <p className="text-xs text-slate-500">ประมวลผลข้อมูลจากกราฟด้านบน เพื่อเสนอแนะแนวทางการบริหารจัดการสารเคมี</p>
+              </div>
+            </div>
+            <button 
+              onClick={generateAIInsight}
+              disabled={isGeneratingAI || filteredData.length === 0}
+              className={`flex items-center px-4 py-2 rounded-lg text-sm font-medium text-white transition-all shadow-sm
+                ${isGeneratingAI || filteredData.length === 0 
+                  ? 'bg-slate-400 cursor-not-allowed' 
+                  : 'bg-indigo-600 hover:bg-indigo-700 hover:shadow-md'}`}
+            >
+              {isGeneratingAI ? (
+                <>
+                  <RefreshCw size={16} className="mr-2 animate-spin" />
+                  กำลังวิเคราะห์...
+                </>
+              ) : (
+                <>
+                  <Sparkles size={16} className="mr-2" />
+                  สร้างข้อเสนอแนะด้วย AI
+                </>
+              )}
+            </button>
+          </div>
+
+          <div className="bg-white rounded-lg p-5 border border-indigo-50 min-h-[120px]">
+            {aiInsight ? (
+              parseFormattedText(aiInsight)
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center text-slate-400 py-8">
+                <Sparkles size={32} className="mb-3 opacity-20" />
+                <p>คลิกปุ่ม "สร้างข้อเสนอแนะด้วย AI" เพื่อให้ระบบช่วยสรุปข้อมูลและหาจุดที่ควรปรับปรุง</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+      </main>
+    </div>
+  );
+}
